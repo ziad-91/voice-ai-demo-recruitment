@@ -1,0 +1,6 @@
+{
+  "name": "RecruitVoice Demo",
+  "description": "A personalized voice agent demo for recruitment pre-screening.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": []
+}

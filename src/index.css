@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-dark: #0c0e14;
+  --color-accent-blue: #3b82f6;
+  --color-glass-bg: rgba(255, 255, 255, 0.04);
+  --color-glass-border: rgba(255, 255, 255, 0.1);
+  --color-text-secondary: #94a3b8;
+}
+
+@layer base {
+  body {
+    @apply bg-bg-dark text-white antialiased;
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+  }
+}
+
+@layer components {
+  .glass-container {
+    @apply bg-glass-bg border border-glass-border rounded-[40px] backdrop-blur-[24px];
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  }
+
+  .background-blobs {
+    @apply absolute inset-0 pointer-events-none overflow-hidden;
+    background: 
+      radial-gradient(circle at 80% 20%, rgba(59, 130, 246, 0.15) 0%, transparent 40%),
+      radial-gradient(circle at 20% 80%, rgba(147, 51, 234, 0.1) 0%, transparent 40%);
+  }
+}
