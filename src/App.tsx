@@ -64,14 +64,13 @@ export default function App() {
               const int16Data = new Int16Array(arrayBuffer);
               const float32Data = int16ToFloat32(int16Data);
               audioQueueRef.current.push(float32Data);
-              if (!isPlayingRef.current) {
-                playNextInQueue();
-              }
+              processAudioQueue();
             }
 
             // Handle interruption
             if (message.serverContent?.interrupted) {
               audioQueueRef.current = [];
+              nextStartTimeRef.current = 0;
               setIsSpeaking(false);
             }
 
@@ -164,39 +163,39 @@ export default function App() {
       setStatus('error');
     }
   };
-  const playNextInQueue = () => {
-    if (!audioContextRef.current) return;
-    
-    if (audioQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      setIsSpeaking(false);
-      nextStartTimeRef.current = 0;
-      return;
-    }
+  const processAudioQueue = () => {
+    if (!audioContextRef.current || audioQueueRef.current.length === 0) return;
 
-    isPlayingRef.current = true;
-    setIsSpeaking(true);
-    const audioData = audioQueueRef.current.shift()!;
-    
-    const buffer = audioContextRef.current.createBuffer(1, audioData.length, 24000);
-    buffer.getChannelData(0).set(audioData);
-    
-    const source = audioContextRef.current.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioContextRef.current.destination);
-    
-    // Improved high-quality scheduling
     const currentTime = audioContextRef.current.currentTime;
-    if (nextStartTimeRef.current < currentTime) {
-      nextStartTimeRef.current = currentTime + 0.05; // Small buffer for network jitter
-    }
     
-    source.start(nextStartTimeRef.current);
-    nextStartTimeRef.current += buffer.duration;
+    // If we're behind or just starting, reset nextStartTime to slightly into the future
+    if (nextStartTimeRef.current < currentTime) {
+      nextStartTimeRef.current = currentTime + 0.1; // 100ms lookahead for stability
+    }
 
-    source.onended = () => {
-      playNextInQueue();
-    };
+    // Schedule up to 1 second into the future
+    while (audioQueueRef.current.length > 0 && nextStartTimeRef.current < currentTime + 1.0) {
+      const audioData = audioQueueRef.current.shift()!;
+      const buffer = audioContextRef.current.createBuffer(1, audioData.length, 24000);
+      buffer.getChannelData(0).set(audioData);
+      
+      const source = audioContextRef.current.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContextRef.current.destination);
+      
+      source.start(nextStartTimeRef.current);
+      nextStartTimeRef.current += buffer.duration;
+      
+      setIsSpeaking(true);
+      isPlayingRef.current = true;
+
+      source.onended = () => {
+        if (audioQueueRef.current.length === 0 && nextStartTimeRef.current <= audioContextRef.current!.currentTime) {
+          setIsSpeaking(false);
+          isPlayingRef.current = false;
+        }
+      };
+    }
   };
 
   const stopConversation = () => {
