@@ -17,8 +17,6 @@ export default function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const sessionRef = useRef<any>(null);
-  const audioQueueRef = useRef<Float32Array[]>([]);
-  const isPlayingRef = useRef(false);
 
   // URL parameters for personalization
   const params = new URLSearchParams(window.location.search);
@@ -26,6 +24,10 @@ export default function App() {
   const companyName = params.get('companyName') || params.get('Company') || 'our recruitment firm';
   const industriesServed = params.get('industriesServed') || 'various sectors';
   const jobTitle = params.get('jobTitle') || 'this';
+
+  const audioQueueRef = useRef<Float32Array[]>([]);
+  const isPlayingRef = useRef(false);
+  const nextStartTimeRef = useRef<number>(0);
 
   const startConversation = async () => {
     try {
@@ -162,11 +164,13 @@ export default function App() {
       setStatus('error');
     }
   };
-
   const playNextInQueue = () => {
+    if (!audioContextRef.current) return;
+    
     if (audioQueueRef.current.length === 0) {
       isPlayingRef.current = false;
       setIsSpeaking(false);
+      nextStartTimeRef.current = 0;
       return;
     }
 
@@ -174,18 +178,25 @@ export default function App() {
     setIsSpeaking(true);
     const audioData = audioQueueRef.current.shift()!;
     
-    if (!audioContextRef.current) return;
-
     const buffer = audioContextRef.current.createBuffer(1, audioData.length, 24000);
     buffer.getChannelData(0).set(audioData);
     
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
     source.connect(audioContextRef.current.destination);
+    
+    // Improved high-quality scheduling
+    const currentTime = audioContextRef.current.currentTime;
+    if (nextStartTimeRef.current < currentTime) {
+      nextStartTimeRef.current = currentTime + 0.05; // Small buffer for network jitter
+    }
+    
+    source.start(nextStartTimeRef.current);
+    nextStartTimeRef.current += buffer.duration;
+
     source.onended = () => {
       playNextInQueue();
     };
-    source.start();
   };
 
   const stopConversation = () => {
