@@ -23,7 +23,7 @@ export default function App() {
   // URL parameters for personalization
   const params = new URLSearchParams(window.location.search);
   const name = params.get('name') || 'Candidate';
-  const companyName = params.get('companyName') || 'our recruitment firm';
+  const companyName = params.get('companyName') || params.get('Company') || 'our recruitment firm';
   const industriesServed = params.get('industriesServed') || 'various sectors';
   const jobTitle = params.get('jobTitle') || 'this';
 
