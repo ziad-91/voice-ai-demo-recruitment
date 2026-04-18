@@ -14,10 +14,10 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const sessionRef = useRef<any>(null);
+  const isSpeakingRef = useRef<boolean>(false);
 
   // URL parameters for personalization
   const params = new URLSearchParams(window.location.search);
@@ -35,38 +35,42 @@ export default function App() {
       setError(null);
 
       // 1. Initialize Audio
-      // Input must be 16000Hz for Gemini model accuracy.
-      // Output must be 24000Hz to prevent "slow motion" decoding artifacts.
-      inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Unified 24000Hz context for zero-lag native processing.
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
       streamRef.current = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-        }
+        } 
       });
       
-      const source = inputAudioContextRef.current.createMediaStreamSource(streamRef.current);
-      const processor = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
+      const source = audioContextRef.current.createMediaStreamSource(streamRef.current);
+      // Restored 4096 buffer length. The 512 length was overloading the WebSocket connection
+      // with 47 messages per second, causing a massive 3-second throttle backlog on the Gemini server.
+      const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
       
-      const muteNode = inputAudioContextRef.current.createGain();
-      muteNode.gain.value = 0; // Crucial: Mutes the mic so it doesn't echo into speakers
+      const muteNode = audioContextRef.current.createGain();
+      muteNode.gain.value = 0; // Mutes the mic so it doesn't echo into speakers
 
       source.connect(processor);
       processor.connect(muteNode);
-      muteNode.connect(inputAudioContextRef.current.destination);
+      muteNode.connect(audioContextRef.current.destination);
 
       // 2. Initialize Gemini Live API
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
       const sessionPromise = ai.live.connect({
-        model: "gemini-2.0-flash-exp",
+        model: "gemini-3.1-flash-live-preview",
         callbacks: {
           onopen: () => {
             setStatus('active');
             console.log('Live API connection opened');
+            // Force the agent to speak first immediately upon connection
+            sessionPromise.then(session => {
+              session.sendRealtimeInput({ text: `Hello, the user ${name} has just joined the call. Please introduce yourself and start the interview according to your instructions.` });
+            });
           },
           onmessage: async (message) => {
             // Handle audio output
@@ -81,23 +85,27 @@ export default function App() {
             // Handle interruption
             if (message.serverContent?.interrupted) {
               nextStartTimeRef.current = 0;
-              activeSourcesRef.current.forEach(source => source.stop());
+              activeSourcesRef.current.forEach(source => {
+                try { source.stop() } catch (e) {}
+              });
               activeSourcesRef.current = [];
               setIsSpeaking(false);
+              isSpeakingRef.current = false;
             }
 
             // Check if model is speaking
             if (message.serverContent?.modelTurn) {
               setIsSpeaking(true);
+              isSpeakingRef.current = true;
             }
           },
           onclose: () => {
-            setStatus('idle');
+            setStatus(prev => prev === 'error' ? 'error' : 'idle');
             stopConversation();
           },
           onerror: (err) => {
             console.error('Live API error:', err);
-            setError('Connection error. Please try again.');
+            setError(err.message || 'Connection error. Please try again.');
             setStatus('error');
             stopConversation();
           }
@@ -158,13 +166,14 @@ export default function App() {
 
       // 3. Handle Microphone Input
       processor.onaudioprocess = (e) => {
-        if (status === 'active' || sessionRef.current) {
+        // Drop mic packets if the AI is actively speaking to definitively prevent self-interruption (Echo).
+        if (sessionRef.current && !isSpeakingRef.current) {
           const inputData = e.inputBuffer.getChannelData(0);
           const int16Data = float32ToInt16(inputData);
           const base64Data = arrayBufferToBase64(int16Data.buffer);
           
           sessionRef.current.sendRealtimeInput({
-            audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+            audio: { data: base64Data, mimeType: 'audio/pcm;rate=24000' }
           });
         }
       };
@@ -177,32 +186,35 @@ export default function App() {
   };
 
   const scheduleAudioChunk = (audioData: Float32Array) => {
-    if (!outputAudioContextRef.current) return;
+    if (!audioContextRef.current) return;
 
-    const currentTime = outputAudioContextRef.current.currentTime;
+    const currentTime = audioContextRef.current.currentTime;
     
-    // If we're starting a new stream or have fallen behind safely catch up
+    // If the audio queue is completely empty and we've fallen behind, reset the clock
+    // This prevents latency buildup without causing overlapping chunks during active speech.
     if (nextStartTimeRef.current < currentTime) {
-      nextStartTimeRef.current = currentTime + 0.02; // Small base latency
+      nextStartTimeRef.current = currentTime + 0.05; // Base latency
     }
 
-    const buffer = outputAudioContextRef.current.createBuffer(1, audioData.length, 24000);
+    const buffer = audioContextRef.current.createBuffer(1, audioData.length, 24000);
     buffer.getChannelData(0).set(audioData);
     
-    const source = outputAudioContextRef.current.createBufferSource();
+    const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
-    source.connect(outputAudioContextRef.current.destination);
+    source.connect(audioContextRef.current.destination);
     
     source.start(nextStartTimeRef.current);
     activeSourcesRef.current.push(source);
     nextStartTimeRef.current += buffer.duration;
     
     setIsSpeaking(true);
+    isSpeakingRef.current = true;
 
     source.onended = () => {
       activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
       if (activeSourcesRef.current.length === 0) {
         setIsSpeaking(false);
+        isSpeakingRef.current = false;
       }
     };
   };
@@ -216,17 +228,16 @@ export default function App() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    if (inputAudioContextRef.current) {
-      inputAudioContextRef.current.close();
-      inputAudioContextRef.current = null;
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
     }
-    if (outputAudioContextRef.current) {
-      outputAudioContextRef.current.close();
-      outputAudioContextRef.current = null;
-    }
-    setStatus('idle');
+    setStatus(prev => prev === 'error' ? 'error' : 'idle');
     setIsSpeaking(false);
-    activeSourcesRef.current.forEach(source => source.stop());
+    isSpeakingRef.current = false;
+    activeSourcesRef.current.forEach(source => {
+      try { source.stop() } catch (e) {}
+    });
     activeSourcesRef.current = [];
     nextStartTimeRef.current = 0;
   };
