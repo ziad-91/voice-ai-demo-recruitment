@@ -14,7 +14,8 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const outputAudioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const sessionRef = useRef<any>(null);
 
@@ -25,9 +26,8 @@ export default function App() {
   const industriesServed = params.get('industriesServed') || 'various sectors';
   const jobTitle = params.get('jobTitle') || 'this';
 
-  const audioQueueRef = useRef<Float32Array[]>([]);
-  const isPlayingRef = useRef(false);
   const nextStartTimeRef = useRef<number>(0);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
   const startConversation = async () => {
     try {
@@ -35,22 +35,34 @@ export default function App() {
       setError(null);
 
       // 1. Initialize Audio
-      // Using 24000Hz as it's the standard output rate for Gemini audio models, 
-      // which prevents the "slow motion" effect.
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Input must be 16000Hz for Gemini model accuracy.
+      // Output must be 24000Hz to prevent "slow motion" decoding artifacts.
+      inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
-      const source = audioContextRef.current.createMediaStreamSource(streamRef.current);
-      const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+      streamRef.current = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
       
+      const source = inputAudioContextRef.current.createMediaStreamSource(streamRef.current);
+      const processor = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
+      
+      const muteNode = inputAudioContextRef.current.createGain();
+      muteNode.gain.value = 0; // Crucial: Mutes the mic so it doesn't echo into speakers
+
       source.connect(processor);
-      processor.connect(audioContextRef.current.destination);
+      processor.connect(muteNode);
+      muteNode.connect(inputAudioContextRef.current.destination);
 
       // 2. Initialize Gemini Live API
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
       const sessionPromise = ai.live.connect({
-        model: "gemini-3.1-flash-live-preview",
+        model: "gemini-2.0-flash-exp",
         callbacks: {
           onopen: () => {
             setStatus('active');
@@ -63,14 +75,14 @@ export default function App() {
               const arrayBuffer = base64ToArrayBuffer(base64Audio);
               const int16Data = new Int16Array(arrayBuffer);
               const float32Data = int16ToFloat32(int16Data);
-              audioQueueRef.current.push(float32Data);
-              processAudioQueue();
+              scheduleAudioChunk(float32Data);
             }
 
             // Handle interruption
             if (message.serverContent?.interrupted) {
-              audioQueueRef.current = [];
               nextStartTimeRef.current = 0;
+              activeSourcesRef.current.forEach(source => source.stop());
+              activeSourcesRef.current = [];
               setIsSpeaking(false);
             }
 
@@ -152,7 +164,7 @@ export default function App() {
           const base64Data = arrayBufferToBase64(int16Data.buffer);
           
           sessionRef.current.sendRealtimeInput({
-            audio: { data: base64Data, mimeType: 'audio/pcm;rate=24000' }
+            audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
           });
         }
       };
@@ -163,39 +175,36 @@ export default function App() {
       setStatus('error');
     }
   };
-  const processAudioQueue = () => {
-    if (!audioContextRef.current || audioQueueRef.current.length === 0) return;
 
-    const currentTime = audioContextRef.current.currentTime;
+  const scheduleAudioChunk = (audioData: Float32Array) => {
+    if (!outputAudioContextRef.current) return;
+
+    const currentTime = outputAudioContextRef.current.currentTime;
     
-    // If we're behind or just starting, reset nextStartTime to slightly into the future
+    // If we're starting a new stream or have fallen behind safely catch up
     if (nextStartTimeRef.current < currentTime) {
-      nextStartTimeRef.current = currentTime + 0.1; // 100ms lookahead for stability
+      nextStartTimeRef.current = currentTime + 0.02; // Small base latency
     }
 
-    // Schedule up to 1 second into the future
-    while (audioQueueRef.current.length > 0 && nextStartTimeRef.current < currentTime + 1.0) {
-      const audioData = audioQueueRef.current.shift()!;
-      const buffer = audioContextRef.current.createBuffer(1, audioData.length, 24000);
-      buffer.getChannelData(0).set(audioData);
-      
-      const source = audioContextRef.current.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioContextRef.current.destination);
-      
-      source.start(nextStartTimeRef.current);
-      nextStartTimeRef.current += buffer.duration;
-      
-      setIsSpeaking(true);
-      isPlayingRef.current = true;
+    const buffer = outputAudioContextRef.current.createBuffer(1, audioData.length, 24000);
+    buffer.getChannelData(0).set(audioData);
+    
+    const source = outputAudioContextRef.current.createBufferSource();
+    source.buffer = buffer;
+    source.connect(outputAudioContextRef.current.destination);
+    
+    source.start(nextStartTimeRef.current);
+    activeSourcesRef.current.push(source);
+    nextStartTimeRef.current += buffer.duration;
+    
+    setIsSpeaking(true);
 
-      source.onended = () => {
-        if (audioQueueRef.current.length === 0 && nextStartTimeRef.current <= audioContextRef.current!.currentTime) {
-          setIsSpeaking(false);
-          isPlayingRef.current = false;
-        }
-      };
-    }
+    source.onended = () => {
+      activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+      if (activeSourcesRef.current.length === 0) {
+        setIsSpeaking(false);
+      }
+    };
   };
 
   const stopConversation = () => {
@@ -207,13 +216,19 @@ export default function App() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+    if (inputAudioContextRef.current) {
+      inputAudioContextRef.current.close();
+      inputAudioContextRef.current = null;
+    }
+    if (outputAudioContextRef.current) {
+      outputAudioContextRef.current.close();
+      outputAudioContextRef.current = null;
     }
     setStatus('idle');
     setIsSpeaking(false);
-    audioQueueRef.current = [];
+    activeSourcesRef.current.forEach(source => source.stop());
+    activeSourcesRef.current = [];
+    nextStartTimeRef.current = 0;
   };
 
   return (
