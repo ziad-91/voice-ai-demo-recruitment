@@ -92,12 +92,6 @@ export default function App() {
               setIsSpeaking(false);
               isSpeakingRef.current = false;
             }
-
-            // Check if model is speaking
-            if (message.serverContent?.modelTurn) {
-              setIsSpeaking(true);
-              isSpeakingRef.current = true;
-            }
           },
           onclose: () => {
             setStatus(prev => prev === 'error' ? 'error' : 'idle');
