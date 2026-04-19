@@ -167,13 +167,29 @@ export default function App() {
       // 3. Handle Microphone Input
       processor.onaudioprocess = (e) => {
         // Drop mic packets if the AI is actively speaking to definitively prevent self-interruption (Echo).
-        if (sessionRef.current && !isSpeakingRef.current) {
+        if (sessionRef.current && !isSpeakingRef.current && audioContextRef.current) {
           const inputData = e.inputBuffer.getChannelData(0);
-          const int16Data = float32ToInt16(inputData);
+          
+          // Hardware Native Sample Rate down-sampling handling to ensure 24000Hz
+          const currentRate = audioContextRef.current.sampleRate;
+          let processData = inputData;
+          if (currentRate !== 24000) {
+            const ratio = currentRate / 24000;
+            const targetLength = Math.round(inputData.length / ratio);
+            processData = new Float32Array(targetLength);
+            for (let i = 0; i < targetLength; i++) {
+              processData[i] = inputData[Math.min(Math.round(i * ratio), inputData.length - 1)];
+            }
+          }
+
+          const int16Data = float32ToInt16(processData);
           const base64Data = arrayBufferToBase64(int16Data.buffer);
           
           sessionRef.current.sendRealtimeInput({
-            audio: { data: base64Data, mimeType: 'audio/pcm;rate=24000' }
+            audio: { 
+              data: base64Data, 
+              mimeType: 'audio/pcm;rate=24000' 
+            }
           });
         }
       };
