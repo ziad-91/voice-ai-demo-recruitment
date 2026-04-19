@@ -35,8 +35,9 @@ export default function App() {
       setError(null);
 
       // 1. Initialize Audio
-      // Unified 24000Hz context for zero-lag native processing.
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Unified 16000Hz context: Gemini's Voice Activity Detection (VAD) relies perfectly on 16kHz input.
+      // Other sample rates or manual nearest-neighbor interpolation corrupts the VAD endpointing with white noise, causing massive delays.
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       
       streamRef.current = await navigator.mediaDevices.getUserMedia({ 
         audio: {
@@ -164,16 +165,32 @@ export default function App() {
         if (sessionRef.current && !isSpeakingRef.current && audioContextRef.current) {
           const inputData = e.inputBuffer.getChannelData(0);
           
-          // Hardware Native Sample Rate down-sampling handling to ensure 24000Hz
+          // Gemini relies on exactly 16000Hz. Unhandled 48000Hz streams from Windows/iOS causes the API session to crash after 2 turns.
           const currentRate = audioContextRef.current.sampleRate;
           let processData = inputData;
-          if (currentRate !== 24000) {
-            const ratio = currentRate / 24000;
+          if (currentRate !== 16000) {
+            const ratio = currentRate / 16000;
             const targetLength = Math.round(inputData.length / ratio);
             processData = new Float32Array(targetLength);
             for (let i = 0; i < targetLength; i++) {
-              processData[i] = inputData[Math.min(Math.round(i * ratio), inputData.length - 1)];
+              const exactPos = i * ratio;
+              const index1 = Math.floor(exactPos);
+              const index2 = Math.min(index1 + 1, inputData.length - 1);
+              const fraction = exactPos - index1;
+              // Clean linear interpolation perfectly preserves VAD cleanly without white noise artifacting
+              processData[i] = inputData[index1] * (1 - fraction) + inputData[index2] * fraction;
             }
+          }
+
+          // Noise Gate: Force 0s into the pipeline when room noise is below threshold.
+          // This allows the Gemini server's VAD algorithm to trip immediately when you stop speaking.
+          let sum = 0;
+          for (let i = 0; i < processData.length; i++) {
+            sum += processData[i] * processData[i];
+          }
+          const rms = Math.sqrt(sum / processData.length);
+          if (rms < 0.003) {
+            processData.fill(0);
           }
 
           const int16Data = float32ToInt16(processData);
@@ -182,7 +199,7 @@ export default function App() {
           sessionRef.current.sendRealtimeInput({
             audio: { 
               data: base64Data, 
-              mimeType: 'audio/pcm;rate=24000' 
+              mimeType: 'audio/pcm;rate=16000' 
             }
           });
         }
